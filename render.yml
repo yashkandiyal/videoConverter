@@ -1,0 +1,117 @@
+# render.yaml - Defines all backend services for Render
+
+services:
+  # 1. The Managed Redis Database
+  - name: video-redis
+    type: redis
+    plan: free # Use the free Redis plan
+
+  # 2. The Main API Server (Web Service)
+  - name: video-api
+    type: web
+    plan: free # Use the free web service plan
+    rootDir: ./server # Look for the Dockerfile in the /server directory
+    env: docker
+    healthCheck:
+      path: /health # Render will ping this path to check if the API is healthy
+    envVars:
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: video-redis
+          property: internalUrl # Automatically get the Redis URL
+      - fromGroup: backend-secrets # Use shared secrets from the group below
+
+  # 3. The Background Workers
+  #    We create one for each resolution, plus the cleanup worker.
+  - name: video-worker-360
+    type: worker
+    plan: free
+    rootDir: ./server
+    env: docker
+    startCommand: node dist/workers/video.worker.js # Use the specific start command
+    envVars:
+      - key: QUEUE_NAME
+        value: video_360p # This worker only listens to the 360p queue
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: video-redis
+          property: internalUrl
+      - fromGroup: backend-secrets
+
+  - name: video-worker-480
+    type: worker
+    plan: free
+    rootDir: ./server
+    env: docker
+    startCommand: node dist/workers/video.worker.js
+    envVars:
+      - key: QUEUE_NAME
+        value: video_480p
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: video-redis
+          property: internalUrl
+      - fromGroup: backend-secrets
+
+  - name: video-worker-720
+    type: worker
+    plan: free
+    rootDir: ./server
+    env: docker
+    startCommand: node dist/workers/video.worker.js
+    envVars:
+      - key: QUEUE_NAME
+        value: video_720p
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: video-redis
+          property: internalUrl
+      - fromGroup: backend-secrets
+  - name: video-worker-1080
+    type: worker
+    plan: free
+    rootDir: ./server
+    env: docker
+    startCommand: node dist/workers/video.worker.js
+    envVars:
+      - key: QUEUE_NAME
+        value: video_1080p
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: video-redis
+          property: internalUrl
+      - fromGroup: backend-secrets
+
+  - name: cleanup-worker
+    type: worker
+    plan: free
+    rootDir: ./server
+    env: docker
+    startCommand: node dist/workers/cleanup.worker.js # The cleanup worker has its own start command
+    envVars:
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: video-redis
+          property: internalUrl
+      - fromGroup: backend-secrets
+
+# Environment variable group shared by all services
+envVarGroups:
+  - name: backend-secrets
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false # 'sync: false' tells Render this is a secret that we will enter manually
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
