@@ -1,13 +1,19 @@
+// /server/src/index.ts
+
 import { env } from "./config/env.js";
 import { logger } from "./utils/logger.js";
 import { initQueueEvents } from "./events/queueEvents.js";
 import { app } from "./app.js";
+import { Server } from "socket.io";
+import { Server as HttpServer } from "http";
 
 let isShuttingDown = false;
 
-const server = app.listen(env.port, () => {
+// FIX: Listen on '0.0.0.0' to be accessible within a Docker environment.
+// Render will forward traffic from the public internet to this port.
+const server: HttpServer = app.listen(env.port, "0.0.0.0", () => {
   logger.info(
-    `🚀  API listening on http://localhost:${env.port} (${env.nodeEnv})`
+    `🚀 API listening on http://0.0.0.0:${env.port} (${env.nodeEnv})`
   );
 });
 
@@ -21,8 +27,9 @@ server.on("error", (err: any) => {
   process.exit(1);
 });
 
-let io: any = null;
+let io: Server | null = null;
 
+// Initialize the WebSocket bridge and other async services.
 (async () => {
   try {
     io = await initQueueEvents(server);
@@ -33,6 +40,7 @@ let io: any = null;
   }
 })();
 
+// Graceful shutdown logic (this is excellent and remains largely the same)
 const gracefulExit = async (signal: string, code = 0) => {
   if (isShuttingDown) {
     logger.warn(`Already shutting down, forcing exit...`);
@@ -42,33 +50,28 @@ const gracefulExit = async (signal: string, code = 0) => {
   isShuttingDown = true;
   logger.info(`Received ${signal}. Shutting down gracefully...`);
 
-  // Set a timeout for forced shutdown
   const forceExitTimer = setTimeout(() => {
     logger.error("Graceful shutdown timed out, forcing exit");
     process.exit(1);
   }, 10000); // 10 second timeout
 
   try {
-    // Close Socket.IO first
     if (io) {
       logger.info("Closing WebSocket connections...");
       await new Promise<void>((resolve) => {
-        io.close(() => {
+        io?.close(() => {
           logger.info("WebSocket bridge closed");
           resolve();
         });
       });
     }
 
-    // Then close HTTP server
     logger.info("Closing HTTP server...");
     await new Promise<void>((resolve, reject) => {
       server.close((err: Error | undefined) => {
-        if (err) reject(err);
-        else {
-          logger.info("HTTP server closed");
-          resolve();
-        }
+        if (err) return reject(err);
+        logger.info("HTTP server closed");
+        resolve();
       });
     });
 
@@ -82,11 +85,11 @@ const gracefulExit = async (signal: string, code = 0) => {
   }
 };
 
-// Signal handlers
+// Signal handlers for graceful shutdown
 process.on("SIGINT", () => gracefulExit("SIGINT"));
 process.on("SIGTERM", () => gracefulExit("SIGTERM"));
 
-// Error handlers
+// Global error handlers
 process.on("unhandledRejection", (reason, promise) => {
   logger.error("Unhandled Rejection at promise", { promise, reason });
   gracefulExit("unhandledRejection", 1);
