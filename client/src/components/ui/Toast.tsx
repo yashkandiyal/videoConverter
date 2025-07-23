@@ -1,6 +1,4 @@
-// src/components/ui/Toast.tsx
-
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import ReactDOM from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import { CheckCircle, AlertTriangle, Info, X } from "lucide-react";
@@ -12,7 +10,6 @@ export interface ToastProps {
   onClose?: () => void;
 }
 
-// NEW: Mapping variants to icons and colors for a richer UI
 const TOAST_VARIANTS = {
   success: {
     icon: <CheckCircle className="text-white" />,

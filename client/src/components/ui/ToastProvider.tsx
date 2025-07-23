@@ -1,6 +1,5 @@
-// src/components/ui/ToastProvider.tsx
-import React, { createContext, useContext, useState, useCallback, type ReactNode } from "react";
-import { Toast, type ToastProps} from "./Toast";
+import { createContext, useContext, useState, useCallback, type ReactNode } from "react";
+import { Toast, type ToastProps } from "./Toast";
 
 interface ToastContextType {
     showToast: (message: string, options?: Omit<ToastProps, "message" | "onClose">) => void;
@@ -37,7 +36,6 @@ export const ToastProvider = ({ children }: { children: ReactNode }) => {
     return (
         <ToastContext.Provider value={{ showToast }}>
             {children}
-            {/* The portal root for all toasts */}
             {toasts.map((toast) => (
                 <Toast
                     key={toast.id}
