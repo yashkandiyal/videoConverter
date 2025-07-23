@@ -6,11 +6,7 @@ class SocketService {
 
   init(apiBase: string, token: string) {
     // If we already have a socket with the same base + token, reuse it
-    if (
-      this.socket &&
-      this.apiBase === apiBase &&
-      this.socket.auth?.token === token
-    ) {
+    if (this.socket && this.apiBase === apiBase) {
       return this.socket;
     }
 
