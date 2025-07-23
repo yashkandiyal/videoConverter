@@ -1,96 +1,134 @@
-// src/jobs/video.processor.ts
-/**
- * A robust, testable wrapper around FFmpeg that:
- *  1. Validates input parameters
- *  2. Checks if input file exists
- *  3. Takes a local input file path
- *  4. Scales it to the requested height (keeping aspect ratio)
- *  5. Writes the result to a local output file path
- *  6. Provides clear error messages
- *
- * It throws descriptive errors if anything goes wrong, so BullMQ
- * will mark the job as "failed" and trigger retries with proper context.
- */
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { execFile, ChildProcess } from "node:child_process";
 import { access } from "node:fs/promises";
-import ffmpegPath from "ffmpeg-static"; // pulls the correct binary for Win/Mac/Linux
-
-const exec = promisify(execFile);
+import ffmpegPath from "ffmpeg-static";
+import ffprobeStatic from "ffprobe-static"; // <-- Use the dedicated package
+import { logger } from "../utils/logger.js";
 
 /**
- * Convert an MP4 to the given height while preserving width ratio.
- *
- * @param input   Absolute/relative path to source video on disk
- * @param output  Path where the resized MP4 should be written
- * @param height  New height in pixels (e.g. 360, 480, 720)
- * @throws {Error} If parameters are invalid, file doesn't exist, or FFmpeg fails
+ * A helper function that runs FFprobe to get the total duration of a video file.
+ * @param input Path to the video file.
+ * @returns The duration of the video in seconds, or 0 if it cannot be determined.
+ */
+async function getVideoDuration(input: string): Promise<number> {
+  try {
+    const ffprobePath = ffprobeStatic.path; // <-- Much more reliable
+    const args = [
+      "-v",
+      "error",
+      "-show_entries",
+      "format=duration",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      input,
+    ];
+
+    const durationPromise = new Promise<number>((resolve, reject) => {
+      execFile(ffprobePath as unknown as string, args, (error, stdout) => {
+        if (error) {
+          return reject(error);
+        }
+        const duration = parseFloat(stdout.trim());
+        resolve(isNaN(duration) ? 0 : duration);
+      });
+    });
+
+    return await durationPromise;
+  } catch (error) {
+    logger.error("Could not determine video duration.", error);
+    return 0; // Return 0 if duration cannot be found, preventing crashes.
+  }
+}
+
+/**
+ * Converts a video to the given height, reporting progress along the way.
  */
 export async function convertResolution(
   input: string,
   output: string,
-  height: number
+  height: number,
+  onProgress: (progress: number) => void
 ): Promise<void> {
-  // Step 1: Validate input parameters
-  if (!input || typeof input !== "string" || input.trim() === "") {
-    throw new Error(
-      "Input file path is required and must be a non-empty string"
+  // --- Step 1: Validation ---
+  if (!input || !output)
+    throw new Error("Input and output paths are required.");
+  if (height <= 0) throw new Error("Height must be a positive number.");
+  await access(input);
+  if (!ffmpegPath) throw new Error("FFmpeg binary not found.");
+
+  // --- Step 2: Get Duration ---
+  const totalDuration = await getVideoDuration(input);
+
+  // --- Step 3: Run FFmpeg and Handle Progress ---
+  const ffmpegArgs = [
+    "-progress",
+    "pipe:1", // Pipe progress data to stdout
+    "-y",
+    "-i",
+    input,
+    "-vf",
+    `scale=-2:${height}`,
+    "-c:v",
+    "libx264",
+    "-preset",
+    "superfast", // <-- Changed to superfast for speed (trade-off: potential quality loss)
+    "-movflags",
+    "faststart",
+    "-threads",
+    "0", // <-- Let FFmpeg auto-optimize threads for multi-core speedup
+    output,
+  ];
+
+  // Optional: Hardware acceleration (uncomment if NVIDIA GPU available)
+  // ffmpegArgs.splice(ffmpegArgs.indexOf("-c:v"), 2, "-c:v", "h264_nvenc", "-preset", "p1"); // Fast NVENC
+
+  await new Promise<void>((resolve, reject) => {
+    // Use `unknown` assertion for maximum TypeScript compatibility
+    const ffmpegProcess: ChildProcess = execFile(
+      ffmpegPath as unknown as string,
+      ffmpegArgs
     );
-  }
 
-  if (!output || typeof output !== "string" || output.trim() === "") {
-    throw new Error(
-      "Output file path is required and must be a non-empty string"
-    );
-  }
-
-  if (!height || typeof height !== "number" || height <= 0 || height > 4320) {
-    throw new Error(
-      "Height must be a positive number between 1 and 4320 pixels"
-    );
-  }
-
-  // Step 2: Check if input file exists and is accessible
-  try {
-    await access(input);
-  } catch (error) {
-    throw new Error(`Input file not found or not accessible: ${input}`);
-  }
-
-  // Step 3: Ensure FFmpeg binary is available
-  if (!ffmpegPath) {
-    throw new Error(
-      "FFmpeg binary not found. Please ensure ffmpeg-static is properly installed."
-    );
-  }
-
-  // Step 4: Execute FFmpeg with proper error handling
-  try {
-    await exec(
-      ffmpegPath,
-      [
-        "-y", // overwrite output file if it exists
-        "-i",
-        input, // specify input file
-        "-vf",
-        `scale=-2:${height}`, // video filter: scale to height, auto-width (even number)
-        "-c:v",
-        "libx264", // video codec: H.264 (widely supported)
-        "-preset",
-        "fast", // encoding speed/quality trade-off
-        "-movflags",
-        "faststart", // optimize for web streaming
-        output, // output file path
-      ],
-      {
-        maxBuffer: 10 * 1024 * 1024, // 10 MB buffer for stdout/stderr
-        timeout: 5 * 60 * 1000, // 5 minute timeout for very large files
+    // Listen to stdout (pipe:1) for progress data
+    ffmpegProcess.stdout?.on("data", (chunk: Buffer) => {
+      const data = chunk.toString();
+      // Parse key-value pairs more efficiently (loop through lines)
+      const lines = data.split("\n");
+      for (const line of lines) {
+        if (line.includes("out_time_ms=")) {
+          const timeMatch = line.match(/out_time_ms=(\d+)/);
+          if (timeMatch && totalDuration > 0) {
+            const currentTimeMs = parseInt(timeMatch[1], 10);
+            const currentTimeSec = currentTimeMs / 1000000;
+            const progress = Math.min(
+              Math.round((currentTimeSec / totalDuration) * 100),
+              100
+            );
+            onProgress(progress);
+          }
+        }
       }
-    );
-  } catch (error: any) {
-    // Provide detailed error information for debugging
-    const errorMessage =
-      error.stderr || error.message || "Unknown FFmpeg error";
-    throw new Error(`Video processing failed: ${errorMessage}`);
-  }
+    });
+
+    let stderrOutput = "";
+    ffmpegProcess.stderr?.on("data", (data) => {
+      stderrOutput += data.toString();
+    });
+
+    ffmpegProcess.on("close", (code) => {
+      if (code === 0) {
+        onProgress(100); // Ensure progress always finishes at 100%
+        resolve();
+      } else {
+        reject(
+          new Error(
+            `Video processing failed with exit code ${code}. FFmpeg output: ${stderrOutput}`
+          )
+        );
+      }
+    });
+
+    ffmpegProcess.on("error", (err) => {
+      reject(err);
+    });
+  });
 }

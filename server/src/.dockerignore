@@ -1,0 +1,5 @@
+# do not send these to Docker daemon
+node_modules
+dist           # we re-build in the Dockerfile anyway
+.git
+*.log

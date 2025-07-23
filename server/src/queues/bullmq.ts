@@ -1,7 +1,6 @@
 // here we wire BullMQ to the Redis connection we just created. From now on every job, retry, and event flows through these objects
 import { Queue, FlowProducer } from "bullmq";
-import { redis } from "../config/redis";
-
+import { redis } from "../config/redis.js";
 function makeQueuePair(
   name: string,
   options?: {
@@ -67,12 +66,18 @@ export const queue720 = makeQueuePair("video_720p", {
   retentionCount: 500, // Keep fewer (larger jobs)
 });
 
+export const queue1080 = makeQueuePair("video_1080p", {
+  retries: 7, // 1080p is the most resource-intensive, try harder
+  retentionDays: 3, // Keep successful jobs longer for debugging
+  retentionCount: 300, // Keep fewer (larger jobs)
+});
+
 // FlowProducer for orchestrating complex workflows (future use)
 // Currently not needed for single-resolution processing, but kept for future features
 export const videoFlow = new FlowProducer({ connection: redis });
 
 // Type definitions for better type safety
-export type VideoResolution = "360p" | "480p" | "720p";
+export type VideoResolution = "360p" | "480p" | "720p" | "1080p";
 
 export interface VideoJobData {
   videoId: string;
@@ -93,6 +98,8 @@ export function addVideoProcessingJob(jobData: VideoJobData) {
       return queue480.add("processVideo", data);
     case "720p":
       return queue720.add("processVideo", data);
+    case "1080p":
+      return queue1080.add("processVideo", data);
     default:
       throw new Error(`Unsupported resolution: ${resolution}`);
   }

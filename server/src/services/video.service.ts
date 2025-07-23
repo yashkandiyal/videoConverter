@@ -1,69 +1,45 @@
-// src/services/video.service.ts
-/**
- * Video job orchestration layer (multi-queue, single requested resolution).
- *
- * User picks ONE output resolution (360 | 480 | 720).
- * We enqueue a single job into the matching queue:
- *   360p  -> queue360.queue  (BullMQ queue "video_360p")
- *   480p  -> queue480.queue  (BullMQ queue "video_480p")
- *   720p  -> queue720.queue  (BullMQ queue "video_720p")
- *
- * No parent/child flow is created. Simpler. Faster. Perfect for your current product.
- * You can later add multi-resolution fan-out by reintroducing FlowProducer.
- */
-
-import type { Job } from "bullmq";
-import { queue360, queue480, queue720 } from "../queues/bullmq.js";
+import { Job, JobsOptions, Queue } from "bullmq";
+import { queue360, queue480, queue720, queue1080 } from "../queues/bullmq.js";
 import { logger } from "../utils/logger.js";
 
-/* ------------------------------------------------------------------
-   1. Supported resolutions
------------------------------------------------------------------- */
+// 1. Supported resolutions and Types
 export const ALLOWED_RESOLUTIONS = [360, 480, 720] as const;
 export type AllowedRes = (typeof ALLOWED_RESOLUTIONS)[number];
 
-/**
- * If you want different *job-level* options per resolution (timeouts, attempts),
- * configure them here and we’ll apply them when we enqueue.
- *
- * Why? 720p encodes usually take longer than 360p. You may want:
- *   - higher timeout
- *   - more attempts
- *   - different backoff
- */
+export interface VideoJobData {
+  srcUrl: string;
+  target: AllowedRes;
+  userId: string;
+  requestedAt: number;
+  originalPublicId: string;
+  [key: string]: unknown;
+}
+
 interface QueueJobOpts {
   attempts: number;
   timeoutMs: number;
   backoffDelayMs: number;
 }
-const RES_JOB_OPTS: Record<AllowedRes, QueueJobOpts> = {
-  360: { attempts: 3, timeoutMs: 10 * 60 * 1_000, backoffDelayMs: 5_000 }, // 10 min
-  480: { attempts: 3, timeoutMs: 20 * 60 * 1_000, backoffDelayMs: 5_000 }, // 20 min
-  720: { attempts: 4, timeoutMs: 30 * 60 * 1_000, backoffDelayMs: 10_000 }, // heavier workload
+
+export const RES_JOB_OPTS: Record<AllowedRes, QueueJobOpts> = {
+  360: { attempts: 3, timeoutMs: 10 * 60 * 1_000, backoffDelayMs: 5_000 },
+  480: { attempts: 3, timeoutMs: 20 * 60 * 1_000, backoffDelayMs: 5_000 },
+  720: { attempts: 4, timeoutMs: 30 * 60 * 1_000, backoffDelayMs: 10_000 },
 };
 
-/* ------------------------------------------------------------------
-   2. Resolution → Queue mapping
-       (We only import .queue; .scheduler is initialized in bullmq.ts)
------------------------------------------------------------------- */
-import type { Queue } from "bullmq";
+// 2. Resolution → Queue mapping
 const RES_TO_QUEUE: Record<AllowedRes, Queue> = {
   360: queue360,
   480: queue480,
   720: queue720,
 };
 
-/* ------------------------------------------------------------------
-   3. Public args & result types
------------------------------------------------------------------- */
+// 3. Public args & result types
 export interface EnqueueVideoArgs {
-  /** Cloudinary secure URL to the ORIGINAL uploaded video. */
   srcUrl: string;
-  /** Auth user ID / tenant key / owner. */
   userId: string;
-  /** Requested resolution (user input — validated). */
   resolution: number;
-  /** Optional bag of metadata (original filename, upload source, etc.) */
+  originalPublicId: string;
   jobMeta?: Record<string, unknown>;
 }
 
@@ -73,9 +49,7 @@ export interface EnqueueVideoResult {
   queueName: string;
 }
 
-/* ------------------------------------------------------------------
-   4. Validation + job name helpers
------------------------------------------------------------------- */
+// 4. Validation + job name helpers
 export function validateResolution(r: number): AllowedRes {
   if (!ALLOWED_RESOLUTIONS.includes(r as AllowedRes)) {
     throw new Error(
@@ -87,42 +61,40 @@ export function validateResolution(r: number): AllowedRes {
   return r as AllowedRes;
 }
 
-/** Friendly job name shown in BullMQ UIs. */
-function buildJobName(res: AllowedRes): string {
-  return `scale:${res}`;
+function buildJobName(res: AllowedRes, userId: string): string {
+  return `transcode:${res}p:${userId}`;
 }
 
-/* ------------------------------------------------------------------
-   5. Enqueue a single job to the correct queue
------------------------------------------------------------------- */
+// 5. Enqueue a single job to the correct queue
 export async function enqueueVideoTranscode(
   args: EnqueueVideoArgs
 ): Promise<EnqueueVideoResult> {
-  const { srcUrl, userId, resolution, jobMeta = {} } = args;
+  const { srcUrl, userId, resolution, originalPublicId, jobMeta = {} } = args;
 
-  // validate & map
   const cleanRes = validateResolution(resolution);
   const queue = RES_TO_QUEUE[cleanRes];
-  const { attempts, timeoutMs, backoffDelayMs } = RES_JOB_OPTS[cleanRes];
+  const { attempts, backoffDelayMs } = RES_JOB_OPTS[cleanRes];
 
-  // add job
+  const jobData: VideoJobData = {
+    srcUrl,
+    target: cleanRes,
+    userId,
+    requestedAt: Date.now(),
+    originalPublicId,
+    ...jobMeta,
+  };
+
+  const jobOptions: JobsOptions = {
+    attempts,
+    backoff: { type: "exponential", delay: backoffDelayMs },
+    removeOnComplete: { age: 3600 * 24, count: 1000 },
+    removeOnFail: { age: 3600 * 24 * 7 },
+  };
+
   const job = await queue.add(
-    buildJobName(cleanRes),
-    {
-      srcUrl,
-      target: cleanRes,
-      userId,
-      requestedAt: Date.now(),
-      ...jobMeta,
-    },
-    {
-      attempts,
-      backoff: { type: "exponential", delay: backoffDelayMs },
-      timeout: timeoutMs,
-      // Per-job cleanup? optional; queue has defaults set in bullmq.ts
-      // removeOnComplete: { age: 86400 },
-      // removeOnFail:     { age: 604800 },
-                }
+    buildJobName(cleanRes, userId),
+    jobData,
+    jobOptions
   );
 
   logger.info(
@@ -136,59 +108,31 @@ export async function enqueueVideoTranscode(
   };
 }
 
-/* ------------------------------------------------------------------
-   6. Status helpers
-   Because we have 3 queues, callers must tell us the resolution (or queueName).
-   We'll provide 3 access patterns:
-     A) getStatusByRes(res, jobId)  ← simplest, if caller knows res
-     B) getStatusByQueue(queueName, jobId)
-     C) bruteForceGetStatus(jobId)  ← try all queues (slow; admin only)
------------------------------------------------------------------- */
-
+// 6. Status helpers
 export interface VideoJobStatus {
   jobId: string;
-  resolution?: AllowedRes; // known if using getStatusByRes
+  resolution?: AllowedRes;
   queueName: string;
   state: Awaited<Job["getState"]>;
   progress: number | object;
-  result?: { resizedUrl: string; target: number } | unknown;
+  result?: unknown;
   error?: string;
-  data?: unknown; // original job.data
+  data?: VideoJobData;
 }
 
-/* ---------- A) Fast path: you know the resolution ---------- */
 export async function getVideoJobStatusByRes(
   resolution: number,
   jobId: string
 ): Promise<VideoJobStatus | null> {
-  let clean: AllowedRes;
-  try {
-    clean = validateResolution(resolution);
-  } catch {
-    return null;
-  }
-  const queue = RES_TO_QUEUE[clean];
-  return getVideoJobStatusFromQueue(queue, jobId, clean);
+  const cleanRes = validateResolution(resolution);
+  const queue = RES_TO_QUEUE[cleanRes];
+  return getVideoJobStatusFromQueue(queue, jobId, cleanRes);
 }
 
-/* ---------- B) If you stored queueName with jobId ---------- */
-export async function getVideoJobStatusByQueue(
-  queueName: string,
-  jobId: string
-): Promise<VideoJobStatus | null> {
-  const queue = Object.values(RES_TO_QUEUE).find((q) => q.name === queueName);
-  if (!queue) return null;
-  return getVideoJobStatusFromQueue(queue, jobId);
-}
-
-/* ---------- C) Brute-force (try all queues) ---------- */
 export async function getVideoJobStatusAnyQueue(
   jobId: string
 ): Promise<VideoJobStatus | null> {
-  for (const [res, queue] of Object.entries(RES_TO_QUEUE) as [
-    string,
-    Queue
-  ][]) {
+  for (const [res, queue] of Object.entries(RES_TO_QUEUE)) {
     const status = await getVideoJobStatusFromQueue(
       queue,
       jobId,
@@ -199,7 +143,6 @@ export async function getVideoJobStatusAnyQueue(
   return null;
 }
 
-/* ---------- core status helper ---------- */
 async function getVideoJobStatusFromQueue(
   queue: Queue,
   jobId: string,
@@ -208,45 +151,29 @@ async function getVideoJobStatusFromQueue(
   const job = await queue.getJob(jobId);
   if (!job) return null;
 
-  const state = await job.getState(); // waiting | active | completed | failed | delayed | paused
-  const progress = job.progress;
-  const result = job.returnvalue;
-  const error = job.failedReason;
-
-  // Try to derive resolution if not provided
-  let resolution = resHint;
-  if (!resolution) {
-    // Attempt from job.data.target if available
-    const tgt = (job.data as any)?.target;
-    if (ALLOWED_RESOLUTIONS.includes(tgt)) resolution = tgt as AllowedRes;
-  }
+  const state = await job.getState();
+  const jobData = job.data as VideoJobData;
+  const resolution = resHint || jobData.target;
 
   return {
     jobId,
     resolution,
     queueName: queue.name,
     state,
-    progress,
-    result: state === "completed" ? result : undefined,
-    error: state === "failed" ? error : undefined,
-    data: job.data,
+    progress: job.progress,
+    result: state === "completed" ? job.returnvalue : undefined,
+    error: state === "failed" ? job.failedReason : undefined,
+    data: jobData,
   };
 }
 
-/* ------------------------------------------------------------------
-   7. Remove / cancel job (before it runs)
------------------------------------------------------------------- */
+// 7. Remove / cancel job
 export async function removeVideoJobByRes(
   resolution: number,
   jobId: string
 ): Promise<boolean> {
-  let clean: AllowedRes;
-  try {
-    clean = validateResolution(resolution);
-  } catch {
-    return false;
-  }
-  const queue = RES_TO_QUEUE[clean];
+  const cleanRes = validateResolution(resolution);
+  const queue = RES_TO_QUEUE[cleanRes];
   const job = await queue.getJob(jobId);
   if (!job) return false;
   await job.remove();

@@ -1,12 +1,19 @@
+// server/tsconfig.json
 {
   "compilerOptions": {
-    "target": "ES2020",
-    "module": "CommonJS",          // or "ESNext" + "type":"module"
-    "rootDir": "src",
-    "outDir": "dist",
+    "target": "ES2022",
+    // These are the key changes for a modern Node.js ESM project
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+
+    // Your existing good settings
+    "rootDir": "./src",
+    "outDir": "./dist",
     "strict": true,
-    "esModuleInterop": true,
+    "esModuleInterop": true, // Still good to have for compatibility
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
-  }
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules"]
 }

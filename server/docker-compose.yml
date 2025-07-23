@@ -1,0 +1,76 @@
+# server/docker-compose.yml
+
+services:
+  # 1. Redis Service with a Healthcheck
+  redis:
+    image: redis:7-alpine
+    container_name: video-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    # This block tells Docker how to check if Redis is actually ready.
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 2. API Service that waits for Redis to be healthy
+  api:
+    build: .
+    container_name: video-api
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    ports:
+      - "${PORT}:${PORT}"
+    # This now waits for the healthcheck to pass before starting the API.
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    command: npm run start
+
+  # 3. Worker Services that also wait for Redis to be healthy
+  worker_360:
+    build: .
+    container_name: video-worker-360
+    env_file:
+      - .env
+    environment:
+      - QUEUE_NAME=video_360p
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    command: npm run start:worker
+
+  worker_480:
+    build: .
+    container_name: video-worker-480
+    env_file:
+      - .env
+    environment:
+      - QUEUE_NAME=video_480p
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    command: npm run start:worker
+
+  worker_720:
+    build: .
+    container_name: video-worker-720
+    env_file:
+      - .env
+    environment:
+      - QUEUE_NAME=video_720p
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    command: npm run start:worker
