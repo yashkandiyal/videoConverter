@@ -1,53 +1,49 @@
 # render.yaml - Defines all backend services for Render
 
-# The `services` key is the root of our blueprint definition.
 services:
   # 1. The Managed Redis Database
-  # This creates a free, managed Redis instance for our queues and caches.
   - name: video-redis
     type: redis
     plan: free
+    ipAllowList: [] # FIX: Add an IP allow list. An empty list allows Render's internal services to connect.
 
   # 2. The Main API Server (Web Service)
-  # This is the public-facing service that handles HTTP and WebSocket connections.
   - name: video-api
     type: web
     plan: free
-    rootDir: ./server # Tells Render to look for the Dockerfile in the /server directory.
+    rootDir: ./server
     env: docker
-    envVars: # Correct casing for environment variables.
+    envVars:
       - key: REDIS_URL
         fromService:
           type: redis
           name: video-redis
-          property: internalUrl # Automatically gets the secure, internal Redis URL.
-      - fromGroup: backend-secrets # Uses the shared secrets defined below.
+          property: connectionString # FIX: Use 'connectionString' instead of 'internalUrl'.
+      - fromGroup: backend-secrets
 
   # 3. The Background Workers
-  # Each worker is a separate service that runs in the background.
-
   - name: video-worker-360
     type: worker
     plan: free
     rootDir: ./server
     env: docker
-    startCommand: node dist/workers/video.worker.js # Use the specific start command for video workers.
+    # FIX: Use 'dockerCommand' to specify a command for Docker-based workers.
+    dockerCommand: node dist/workers/video.worker.js
     envVars:
       - key: QUEUE_NAME
-        value: video_360p # This worker only listens to the 360p queue.
+        value: video_360p
       - key: REDIS_URL
         fromService:
           type: redis
           name: video-redis
-          property: internalUrl
-      - fromGroup: backend-secrets
+          property: connectionString # FIX: Use 'connectionString'.
 
   - name: video-worker-480
     type: worker
     plan: free
     rootDir: ./server
     env: docker
-    startCommand: node dist/workers/video.worker.js
+    dockerCommand: node dist/workers/video.worker.js
     envVars:
       - key: QUEUE_NAME
         value: video_480p
@@ -55,15 +51,14 @@ services:
         fromService:
           type: redis
           name: video-redis
-          property: internalUrl
-      - fromGroup: backend-secrets
+          property: connectionString
 
   - name: video-worker-720
     type: worker
     plan: free
     rootDir: ./server
     env: docker
-    startCommand: node dist/workers/video.worker.js
+    dockerCommand: node dist/workers/video.worker.js
     envVars:
       - key: QUEUE_NAME
         value: video_720p
@@ -71,15 +66,14 @@ services:
         fromService:
           type: redis
           name: video-redis
-          property: internalUrl
-      - fromGroup: backend-secrets
+          property: connectionString
 
   - name: video-worker-1080
     type: worker
     plan: free
     rootDir: ./server
     env: docker
-    startCommand: node dist/workers/video.worker.js
+    dockerCommand: node dist/workers/video.worker.js
     envVars:
       - key: QUEUE_NAME
         value: video_1080p
@@ -87,33 +81,31 @@ services:
         fromService:
           type: redis
           name: video-redis
-          property: internalUrl
-      - fromGroup: backend-secrets
+          property: connectionString
 
   - name: cleanup-worker
     type: worker
     plan: free
     rootDir: ./server
     env: docker
-    startCommand: node dist/workers/cleanup.worker.js # The cleanup worker has its own dedicated start command.
+    dockerCommand: node dist/workers/cleanup.worker.js
     envVars:
       - key: REDIS_URL
         fromService:
           type: redis
           name: video-redis
-          property: internalUrl
-      - fromGroup: backend-secrets
+          property: connectionString
 
-# This section defines a group of environment variables that can be shared across multiple services.
+# Environment variable group (no changes needed here, it was correct)
 envVarGroups:
   - name: backend-secrets
     envVars:
       - key: NODE_ENV
         value: production
       - key: PORT
-        value: 3000 # Render will automatically map its internal port 3000 to the public port 443 (HTTPS).
+        value: 3000
       - key: CLOUDINARY_CLOUD_NAME
-        sync: false # 'sync: false' marks this as a secret that you will enter manually in the Render dashboard.
+        sync: false
       - key: CLOUDINARY_API_KEY
         sync: false
       - key: CLOUDINARY_API_SECRET
